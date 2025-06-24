@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <form id="chatForm">
+    <input type="text" id="userInput" placeholder="Input questions..." required>
+    <button type="submit">send</button>
+  </form>
+  <div id="response" style="white-space: pre-wrap;"></div>
+
+  <script>
+    document.getElementById('chatForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const userInput = document.getElementById('userInput').value;
+      const responseDiv = document.getElementById('response');
+      responseDiv.textContent = 'Thinking...';
+
+      try {
+        const response = await fetch('http://localhost:8011/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'deepseek-r1:1.5b',
+            messages: [{ role: 'user', content: userInput }],
+            stream: true,
+			options: {
+                tokenize: true
+            }
+          })
+        });
+
+        if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let fullResponse = '';
+        let finalOutput = '';  // load current content
+        let isInThink = false; // label if is in think block
+		
+        const processThinkBlocks = (content) => { // strengthened think block processor
+          let output = '';
+          let lastIndex = 0;
+          let start;
+
+          while ((start = content.indexOf('<think>', lastIndex)) !== -1) {
+            // buffer content before think block
+            output += content.slice(lastIndex, start);
+            
+            const end = content.indexOf('</think>', start + 7);
+            if (end === -1) {
+              // unfinished think block, tag status
+              isInThink = true;
+              lastIndex = start;
+              break;
+            } else {
+              // skip all the think block
+              lastIndex = end + 8;
+              isInThink = false;
+            }
+          }
+          
+          // add remained contend possibly unfinished block
+          output += content.slice(lastIndex);
+          return output;
+        };
+
+        // stream process main circle
+        while (true) {
+          const { done, value } = await reader.read();
+          const isStreamEnd = done; // label if is stream ends
+
+          // process data block
+          if (value) {
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const message = line.replace('data: ', '');
+              if (message === '[DONE]') break;
+
+              try {
+                const parsed = JSON.parse(message);
+                if (parsed.message?.content) {
+                  fullResponse += parsed.message.content;
+                  finalOutput = processThinkBlocks(fullResponse);// solve think block in time
+                  responseDiv.textContent = finalOutput;
+                }
+              } catch (err) {
+                console.warn('JSON serve failed ', err);
+              }
+            }
+          }
+
+          //=== test logic ===//
+          if (isStreamEnd) {
+            // stage 1 all buffed data
+            if (buffer) {
+              const remainingMessage = buffer.replace('data: ', '');
+              try {
+                const parsed = JSON.parse(remainingMessage);
+                if (parsed.message?.content) {
+                  finalOutput = processThinkBlocks(fullResponse + parsed.message.content);
+                }
+              } catch {}
+            }
+
+            // stage 2 test data option
+            const hasUnclosedThink = isInThink; // whether unclosed thinking tags
+            const hasEffectiveContent = finalOutput.trim().length > 0;
+
+            if (!hasUnclosedThink && hasEffectiveContent) {
+              console.log('Completed');
+              // init afterwards options
+              responseDiv.textContent += '\n\nChat output completed';
+            } else if (hasUnclosedThink) {
+              console.warn('unclosed thinking...');
+            }
+            break;
+          }
+        }
+      } catch (error) {
+        responseDiv.textContent = `error: ${error.message}`;
+        console.error('request error:', error);
+      }
+    });
+  </script>
+</body>
+</html>
